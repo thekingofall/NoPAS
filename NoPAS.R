@@ -48,7 +48,7 @@ NumericVector cpp_wilcox(NumericMatrix ranks_matrix,
 ')
 
 
-calculate_presto_scores <- function(expr_matrix, pathways, scaler_method = "robust", min_genes = 3) {
+calculate_NoPAS_scores <- function(expr_matrix, pathways, scaler_method = "robust", min_genes = 3) {
 
   if(scaler_method == "robust") {
     norm_expr <- t(apply(expr_matrix, 1, cpp_normalize_robust))
@@ -91,7 +91,7 @@ calculate_significance <- function(expr_matrix,
                                  min_genes = 3) {
   
   set.seed(seed)
-  real_scores <- calculate_presto_scores(expr_matrix, pathways, scaler_method, min_genes)
+  real_scores <- calculate_NoPAS_scores(expr_matrix, pathways, scaler_method, min_genes)
   
 
   n_pathways <- length(pathways)
@@ -101,12 +101,12 @@ calculate_significance <- function(expr_matrix,
   n_cores <- detectCores() - 1
   cl <- makeCluster(n_cores)
 
-  clusterExport(cl, c("calculate_presto_scores", "cpp_normalize_robust", "cpp_wilcox"))
+  clusterExport(cl, c("calculate_NoPAS_scores", "cpp_normalize_robust", "cpp_wilcox"))
   
   random_scores <- parLapply(cl, 1:n_permutations, function(i) {
     shuffled_expr <- expr_matrix
     rownames(shuffled_expr) <- sample(rownames(shuffled_expr))
-    as.vector(calculate_presto_scores(shuffled_expr, pathways, scaler_method, min_genes))
+    as.vector(calculate_NoPAS_scores(shuffled_expr, pathways, scaler_method, min_genes))
   })
   
   stopCluster(cl)
