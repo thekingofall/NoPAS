@@ -3,49 +3,49 @@ library(parallel)
 library(pbapply)
 
 cppFunction('
-NumericVector cpp_normalize_robust(NumericVector x) {
+NumericVector cpp_NoPAS_normalize_robust(NumericVector x) {
     int n = x.length();
     NumericVector sorted = clone(x);
     std::sort(sorted.begin(), sorted.end());
     
     double q10 = sorted[int(n * 0.1)];
     double q90 = sorted[int(n * 0.9)];
-    double med = (n % 2 == 0) ? 
+    double median = (n % 2 == 0) ? 
         (sorted[n/2 - 1] + sorted[n/2])/2.0 : 
         sorted[n/2];
     
     double range = q90 - q10;
     if(range == 0) range = 1;
     
-    NumericVector result(n);
+    NumericVector normalized(n);
     for(int i = 0; i < n; i++) {
-        result[i] = (x[i] - med) / range;
+        normalized[i] = (x[i] - median) / range;
     }
-    return result;
+    return normalized;
 }
 ')
 
 cppFunction('
-NumericVector cpp_wilcox(NumericMatrix Orders_matrix,
-                        IntegerVector pathway_idx,
-                        int n_genes) {
-    int n_samples = Orders_matrix.ncol();
-    NumericVector results(n_samples);
+NumericVector cpp_NoPAS_wilcox(NumericMatrix order_matrix,
+                        IntegerVector pathway_indices,
+                        int total_genes) {
+    int n_samples = order_matrix.ncol();
+    NumericVector wilcox_results(n_samples);
     
-    int n1 = pathway_idx.length();
-    int n2 = n_genes - n1;
+    int n_pathway_genes = pathway_indices.length();
+    int n_other_genes = total_genes - n_pathway_genes;
     
     for(int j = 0; j < n_samples; j++) {
-        NumericVector col = Orders_matrix.column(j);
-        double Order_sum = 0;
-        for(int i = 0; i < n1; i++) {
-            Order_sum += col[pathway_idx[i]];
+        NumericVector sample_order = order_matrix.column(j);
+        double rank_sum = 0;
+        for(int i = 0; i < n_pathway_genes; i++) {
+            rank_sum += sample_order[pathway_indices[i]];
         }
-        double U = Order_sum - (n1 * (n1 + 1))/2;
-        results[j] = U/(n1 * n2);
+        double U = rank_sum - (n_pathway_genes * (n_pathway_genes + 1))/2;
+        wilcox_results[j] = U / (n_pathway_genes * n_other_genes);
     }
     
-    return results;
+    return wilcox_results;
 }
 ')
 
@@ -57,66 +57,73 @@ calculate_NoPAS_scores <- function(expr_matrix,
                                    n_cores = detectCores() - 1) {
   
   if (scaler_method == "robust") {
-    norm_expr <- t(apply(expr_matrix, 1, cpp_normalize_robust))
-    rownames(norm_expr) <- rownames(expr_matrix)
-    colnames(norm_expr) <- colnames(expr_matrix)
+    NoPAS_normalized <- t(apply(expr_matrix, 1, cpp_NoPAS_normalize_robust))
+    rownames(NoPAS_normalized) <- rownames(expr_matrix)
+    colnames(NoPAS_normalized) <- colnames(expr_matrix)
   } else {
-    stop("Currently only robust scaling is implemented in Rcpp version")
+    stop("目前仅支持 Rcpp 版本的稳健归一化方法")
   }
   
-  Orders_matrix <- apply(norm_expr, 2, Order, ties.method = "average")
-  rownames(Orders_matrix) <- rownames(norm_expr)
+  NoPAS_order_matrix <- apply(NoPAS_normalized, 2, rank, ties.method = "average")
+  rownames(NoPAS_order_matrix) <- rownames(NoPAS_normalized)
   
   pathway_names <- names(pathways)
   
   if (!use_parallel) {
-    message("[calculate_NoPAS_scores] Running in single-thread mode with a progress bar...")
+    message("[calculate_NoPAS_scores] 以单线程模式运行，并显示进度条...")
     scores_list <- pbapply::pblapply(
       X = pathway_names,
       FUN = function(pathway_name) {
-        genes_in_pathway <- intersect(pathways[[pathway_name]], rownames(Orders_matrix))
+        genes_in_pathway <- intersect(pathways[[pathway_name]], rownames(NoPAS_order_matrix))
+        
         if (length(genes_in_pathway) < min_genes) {
-          return(rep(NA, ncol(norm_expr)))
+          return(rep(NA, ncol(NoPAS_normalized)))
         }
-        pathway_idx <- match(genes_in_pathway, rownames(Orders_matrix)) - 1
-        cpp_wilcox(Orders_matrix, pathway_idx, nrow(Orders_matrix))
+        
+        pathway_indices <- match(genes_in_pathway, rownames(NoPAS_order_matrix)) - 1
+        
+        cpp_NoPAS_wilcox(NoPAS_order_matrix, pathway_indices, nrow(NoPAS_order_matrix))
       }
     )
   } else {
-    message("[calculate_NoPAS_scores] Running in parallel mode...")
+    message("[calculate_NoPAS_scores] 以并行模式运行...")
     scores_list <- mclapply(
       X = pathway_names,
       FUN = function(pathway_name) {
-        genes_in_pathway <- intersect(pathways[[pathway_name]], rownames(Orders_matrix))
+        genes_in_pathway <- intersect(pathways[[pathway_name]], rownames(NoPAS_order_matrix))
+        
         if (length(genes_in_pathway) < min_genes) {
-          return(rep(NA, ncol(norm_expr)))
+          return(rep(NA, ncol(NoPAS_normalized)))
         }
-        pathway_idx <- match(genes_in_pathway, rownames(Orders_matrix)) - 1
-        cpp_wilcox(Orders_matrix, pathway_idx, nrow(Orders_matrix))
+        
+        pathway_indices <- match(genes_in_pathway, rownames(NoPAS_order_matrix)) - 1
+        
+        cpp_NoPAS_wilcox(NoPAS_order_matrix, pathway_indices, nrow(NoPAS_order_matrix))
       },
       mc.cores = n_cores
     )
   }
   
-  scores <- do.call(rbind, scores_list)
-  rownames(scores) <- pathway_names
-  colnames(scores) <- colnames(norm_expr)
-  scores=as.data.frame(scores)
-  return(scores)
+  NoPAS_scores <- do.call(rbind, scores_list)
+  rownames(NoPAS_scores) <- pathway_names
+  colnames(NoPAS_scores) <- colnames(NoPAS_normalized)
+  NoPAS_scores <- as.data.frame(NoPAS_scores)
+  
+  return(NoPAS_scores)
 }
 
-calculate_significance <- function(expr_matrix, 
-                                   pathways, 
-                                   n_permutations = 1000, 
-                                   seed = 42,
-                                   scaler_method = "robust",
-                                   min_genes = 3,
-                                   use_parallel = TRUE,
-                                   n_cores = detectCores() - 1) {
+calculate_NoPAS_significance <- function(expr_matrix, 
+                                         pathways, 
+                                         n_permutations = 1000, 
+                                         seed = 42,
+                                         scaler_method = "robust",
+                                         min_genes = 3,
+                                         use_parallel = TRUE,
+                                         n_cores = detectCores() - 1) {
   
   set.seed(seed)
   
-  real_scores <- calculate_NoPAS_scores(
+  real_NoPAS_scores <- calculate_NoPAS_scores(
     expr_matrix = expr_matrix,
     pathways = pathways,
     scaler_method = scaler_method,
@@ -125,37 +132,42 @@ calculate_significance <- function(expr_matrix,
     n_cores = n_cores
   )
   
-  real_scores_vec <- as.vector(real_scores)
+  real_scores_vec <- as.vector(real_NoPAS_scores)
+  
   n_pathways <- length(pathways)
   n_samples <- ncol(expr_matrix)
   
-  message("[calculate_significance] Permutation testing with n_permutations = ", n_permutations)
+  message("[calculate_NoPAS_significance] 进行置换测试，置换次数 = ", n_permutations)
+  
   if (!use_parallel) {
-    message("[calculate_significance] Running single-thread with a progress bar for permutations...")
+    message("[calculate_NoPAS_significance] 以单线程模式运行置换，并显示进度条...")
     random_scores_list <- pbapply::pblapply(
       X = seq_len(n_permutations),
       FUN = function(i) {
         shuffled_expr <- expr_matrix
         rownames(shuffled_expr) <- sample(rownames(shuffled_expr))
-        as.vector(calculate_NoPAS_scores(
+        
+        shuffled_scores <- calculate_NoPAS_scores(
           expr_matrix = shuffled_expr,
           pathways = pathways,
           scaler_method = scaler_method,
           min_genes = min_genes,
           use_parallel = FALSE,  
           n_cores = 1
-        ))
+        )
+        
+        return(as.vector(shuffled_scores))
       }
     )
   } else {
-    message("[calculate_significance] Running in parallel mode for permutations (no real-time progress bar).")
+    message("[calculate_NoPAS_significance] 以并行模式运行置换测试（无实时进度条）。")
     cl <- makeCluster(n_cores)
     on.exit(stopCluster(cl), add = TRUE)
     
     clusterExport(
       cl,
       varlist = c("expr_matrix", "pathways", "scaler_method", "min_genes",
-                  "calculate_NoPAS_scores", "cpp_normalize_robust", "cpp_wilcox"),
+                  "calculate_NoPAS_scores", "cpp_NoPAS_normalize_robust", "cpp_NoPAS_wilcox"),
       envir = environment()
     )
     
@@ -165,23 +177,26 @@ calculate_significance <- function(expr_matrix,
       fun = function(i) {
         shuffled_expr <- expr_matrix
         rownames(shuffled_expr) <- sample(rownames(shuffled_expr))
-        as.vector(calculate_NoPAS_scores(
+        
+        shuffled_scores <- calculate_NoPAS_scores(
           expr_matrix = shuffled_expr,
           pathways = pathways,
           scaler_method = scaler_method,
           min_genes = min_genes,
           use_parallel = FALSE,
           n_cores = 1
-        ))
+        )
+        
+        return(as.vector(shuffled_scores))
       }
     )
   }
   
-  random_scores <- do.call(rbind, random_scores_list)
+  random_NoPAS_scores <- do.call(rbind, random_scores_list)
   
   pvalues <- matrix(
     colMeans(
-      random_scores >= matrix(
+      random_NoPAS_scores >= matrix(
         real_scores_vec,
         nrow = n_permutations,
         ncol = length(real_scores_vec),
@@ -190,11 +205,13 @@ calculate_significance <- function(expr_matrix,
     ),
     nrow = n_pathways,
     ncol = n_samples,
-    dimnames = dimnames(real_scores)
+    dimnames = dimnames(real_NoPAS_scores)
   )
   
+  pvalues <- as.data.frame(pvalues)
+  
   return(list(
-    scores = as.data.frame(real_scores),
-    pvalues = as.data.frame(pvalues)
+    scores = real_NoPAS_scores,
+    pvalues = pvalues
   ))
 }
